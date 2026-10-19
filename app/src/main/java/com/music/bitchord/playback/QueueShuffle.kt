@@ -97,6 +97,11 @@ object QueueShuffle {
         if (cur !in 0 until count) return true
 
         val currentItem = player.getMediaItemAt(cur)
+        // A campaign has no canonical index by design, so resolving one here
+        // would report the context stale and drop the shuffle state the moment
+        // a campaign played. It sits in the queue as an extra row, not as a
+        // missing member of the collection.
+        if (currentItem.isCampaign) return true
         if (currentItem.queueTier != QueueTier.CONTEXT) {
             return true
         }
@@ -236,7 +241,9 @@ object QueueShuffle {
 
         // If canonicalContext is empty, discover it from the player's context tracks
         if (ctx == null) {
-            val contextItems = items.filter { it.queueTier == QueueTier.CONTEXT }
+            // Campaigns are CONTEXT-tier but are not members of the collection,
+            // so they are not part of the canonical order this discovers.
+            val contextItems = items.filter { it.queueTier == QueueTier.CONTEXT && !it.isCampaign }
             if (contextItems.isNotEmpty()) {
                 setCanonicalContext(contextItems)
             }
@@ -313,7 +320,13 @@ object QueueShuffle {
         }
 
         val currentItem = items[currentIndex]
-        val isCurrentContext = currentItem.queueTier == QueueTier.CONTEXT
+        // A campaign is CONTEXT-tier but has no canonical index — it is an
+        // extra row riding on the queue, not a member of the collection. So it
+        // anchors like a USER_QUEUE or AUTOPLAY item does: the backward scan
+        // below finds the most recent real context row and restores around
+        // that, instead of this campaign looking like a context row whose
+        // canonical index went missing and dropping the whole context.
+        val isCurrentContext = currentItem.queueTier == QueueTier.CONTEXT && !currentItem.isCampaign
         var currentCanonicalIndex: Int? = null
 
         // If currently playing track is CONTEXT, use its canonical index directly.

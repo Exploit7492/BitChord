@@ -23,6 +23,8 @@ import androidx.media3.common.Timeline
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionToken
+import com.music.bitchord.campaign.CampaignQueueInjection
+import com.music.bitchord.campaign.Campaigns
 import com.music.bitchord.data.model.ArtistRef
 import com.music.bitchord.data.model.NOTIFICATION_ART_PX
 import com.music.bitchord.data.model.PlaybackSourceType
@@ -237,6 +239,7 @@ fun Song.toSongBundle(): Bundle = bundleOf(
     "isExplicit" to (isExplicit ?: false),
     "queueTier" to queueTier.name,
     "queueEntryId" to queueEntryId,
+    "isCampaign" to isCampaign,
     // `bundleOf` has no overload for a list of strings, so the two halves of
     // the credits go in afterwards.
 ).apply {
@@ -272,6 +275,7 @@ fun songFromBundle(b: Bundle): Song {
         isExplicit = if (b.containsKey("isExplicit")) b.getBoolean("isExplicit") else null,
         queueTier = queueTier,
         queueEntryId = b.getString("queueEntryId"),
+        isCampaign = b.getBoolean("isCampaign"),
     )
 }
 
@@ -461,6 +465,7 @@ fun MediaItem.toSong() = Song(
     playbackSourceId = mediaMetadata.extras?.getString(EXTRA_PLAYBACK_SOURCE_ID),
     localUri = mediaMetadata.extras?.getString(EXTRA_LOCAL_URI),
     localPath = mediaMetadata.extras?.getString(EXTRA_LOCAL_PATH),
+    isCampaign = mediaMetadata.extras?.getBoolean(EXTRA_IS_CAMPAIGN) == true,
 )
 
 internal val mediaItemTiers = java.util.Collections.synchronizedMap(java.util.WeakHashMap<MediaItem, QueueTier>())
@@ -490,6 +495,20 @@ val MediaItem.queueTier: QueueTier
 /** @see Song.queueEntryId */
 val MediaItem.queueEntryId: String?
     get() = mediaMetadata.extras?.getString(EXTRA_QUEUE_ENTRY_ID) ?: mediaItemEntryIds[this]
+
+/**
+ * Whether this item is a campaign injected into a queue slot.
+ *
+ * A campaign is a CONTEXT-tier row that deliberately has no canonical index:
+ * the canonical context is what "the album or playlist this queue is" means,
+ * and a promoted track is not part of it. [QueueShuffle] must therefore treat
+ * a campaign as a legitimate current item rather than as a context row that
+ * has fallen out of its collection — otherwise every campaign that reached
+ * the top of the queue would look like a stale context and throw the
+ * shuffle state away.
+ */
+val MediaItem.isCampaign: Boolean
+    get() = mediaMetadata.extras?.getBoolean(EXTRA_IS_CAMPAIGN) == true
 
 /** Public metadata keys for queue categorization and immutable queue entry identity. */
 const val EXTRA_QUEUE_TIER = "bitchord.queueTier"
@@ -564,6 +583,7 @@ private const val EXTRA_SOURCE_QUALITY = "bitchord.sourceQuality"
 private const val EXTRA_SOURCE_HI_RES = "bitchord.sourceHiRes"
 private const val EXTRA_IS_VIDEO = "bitchord.isVideo"
 private const val EXTRA_VIDEO_ORIGIN = "bitchord.isVideoOrigin"
+private const val EXTRA_IS_CAMPAIGN = "bitchord.isCampaign"
 
 /** Set only on the replacement item produced by [QualityUpgrade]. */
 const val EXTRA_QUALITY_UPGRADED = "bitchord.qualityUpgraded"
@@ -743,7 +763,7 @@ fun Song.toMediaItem(): MediaItem {
                     offlineUri != null || durationText != null ||
                     artistId != null || albumId != null || setVideoId != null ||
                     isExplicit != null || isVideo || isVideoOrigin || radioName != null ||
-                    sourceQuality != null ||
+                    sourceQuality != null || isCampaign ||
                     playbackSource != null || playbackSourceType != null || playbackSourceId != null
                 ) {
                     setExtras(
@@ -766,6 +786,7 @@ fun Song.toMediaItem(): MediaItem {
                             EXTRA_VIDEO_ORIGIN to isVideoOrigin,
                             EXTRA_SOURCE_QUALITY to sourceQuality,
                             EXTRA_SOURCE_HI_RES to sourceHiRes,
+                            EXTRA_IS_CAMPAIGN to isCampaign,
                         ),
                     )
                 }
@@ -875,21 +896,42 @@ suspend fun MediaController.playSongs(songs: List<Song>, startIndex: Int) {
     // played out of order — see [QueueShuffle]. The track the user picked still
     // leads, so it ends up at the top instead of at [startIndex].
     val shuffled = QueueShuffle.enabled.value
-    val items = withContext(Dispatchers.Default) {
+    val prepared = withContext(Dispatchers.Default) {
         val songsWithIds = songs.map { song ->
             if (song.queueEntryId == null) song.copy(queueEntryId = java.util.UUID.randomUUID().toString()) else song
         }
-        val contextEntries = songsWithIds.filter { it.queueTier == QueueTier.CONTEXT }
-        val canonicalIndexMap = contextEntries.mapIndexed { idx, s -> s.queueEntryId!! to idx }.toMap()
-
         val queue = if (shuffled) {
             QueueShuffle.startingOrder(songsWithIds, startIndex.coerceIn(songsWithIds.indices))
         } else {
             songsWithIds
         }
-        val mediaItems = queue.map { song ->
+        val baseStartIndex = queueStartIndex(startIndex, queue.size, shuffled)
+
+        // Campaign injection is the last step, on top of an order shuffle has
+        // already settled — see [CampaignQueueInjection] for why the
+        // fifth-position pattern cannot be laid down before shuffle runs.
+        // Every queue passes through here, which is what makes injection a
+        // property of playback rather than of one queue type.
+        val injected = CampaignQueueInjection.inject(
+            baseItems = queue,
+            targetOriginalIndex = baseStartIndex,
+        ) { Campaigns.nextForSlot() }
+        val ordered = injected.items
+        val playIndex = injected.adjustedTargetIndex
+            .takeIf { it >= 0 }
+            ?.coerceIn(0, ordered.lastIndex)
+            ?: baseStartIndex.coerceIn(0, ordered.lastIndex)
+
+        // Campaign rows are excluded from the canonical context: that set is
+        // what "the album/playlist this queue is" means, and a promoted track
+        // is not part of it. Left in, every campaign would claim a canonical
+        // index and a later shuffle would file it as an album track.
+        val contextEntries = ordered.filter { it.queueTier == QueueTier.CONTEXT && !it.isCampaign }
+        val canonicalIndexMap = contextEntries.mapIndexed { idx, s -> s.queueEntryId!! to idx }.toMap()
+
+        val mediaItems = ordered.map { song ->
             val item = song.toMediaItem()
-            val cIndex = if (song.queueTier == QueueTier.CONTEXT) {
+            val cIndex = if (song.queueTier == QueueTier.CONTEXT && !song.isCampaign) {
                 canonicalIndexMap[song.queueEntryId]
             } else null
             if (cIndex != null) QueueShuffle.withQueueMetadata(item, newCanonicalIndex = cIndex) else item
@@ -900,9 +942,9 @@ suspend fun MediaController.playSongs(songs: List<Song>, startIndex: Int) {
         }
         QueueShuffle.setCanonicalContext(canonicalMediaItems)
 
-        mediaItems
+        mediaItems to playIndex
     }
-    setMediaItems(items, queueStartIndex(startIndex, items.size, shuffled), 0L)
+    setMediaItems(prepared.first, prepared.second, 0L)
     prepare()
     play()
 }

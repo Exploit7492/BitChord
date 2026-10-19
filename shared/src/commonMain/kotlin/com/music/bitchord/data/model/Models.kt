@@ -135,6 +135,13 @@ data class Song(
     val playbackSourceType: PlaybackSourceType? = null,
     /** Browse id for an album, playlist, or other source page. */
     val playbackSourceId: String? = null,
+    /**
+     * True for a promoted campaign track spliced into the queue by
+     * [com.music.bitchord.campaign.CampaignQueueInjection]. Lets the player
+     * label a campaign row distinctly (and, later, report a campaign play)
+     * without re-deriving that from the video id.
+     */
+    val isCampaign: Boolean = false,
 ) {
     /** Legacy derived property: true if and only if [queueTier] is [QueueTier.AUTOPLAY]. */
     val fromAutoplay: Boolean get() = queueTier == QueueTier.AUTOPLAY

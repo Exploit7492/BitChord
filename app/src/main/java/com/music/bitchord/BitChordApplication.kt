@@ -126,6 +126,13 @@ class BitChordApplication : Application(), SingletonImageLoader.Factory {
         ListenTogether.init(this)
         SearchHistory.init(this)
         LastPlayed.init(this)
+        // Campaigns are read-only here — the app only asks which campaign
+        // plays in a queue slot. Blank config disables injection rather than
+        // failing, so this is safe on any build. See [Campaigns].
+        com.music.bitchord.campaign.Campaigns.init(
+            supabaseUrl = BuildConfig.SUPABASE_URL,
+            anonKey = BuildConfig.SUPABASE_ANON_KEY,
+        )
         BoundedContextPersistence.init(this)
         com.music.bitchord.playback.PartyPersonalQueueStash.init(this)
         // Which tracks the listener has reverted to YouTube's own upload. Read
