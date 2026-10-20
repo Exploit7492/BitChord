@@ -1336,6 +1336,12 @@ private fun BitChordApp(
         if (allSongs.getOrNull(allIndex)?.isUnresolvedSpotify == true) return
         val songs = allSongs.filterNot { it.isUnresolvedSpotify }
         val index = songs.indexOf(allSongs.getOrNull(allIndex)).coerceAtLeast(0)
+        // Record the genre context of the surface this queue was started from,
+        // so a campaign slot on it cannot be served a different genre. Only an
+        // Explore mood/genre tile carries one; every other surface clears it.
+        com.music.bitchord.campaign.Campaigns.setGenreContext(
+            source.title.takeIf { source.type == PlaybackSourceType.EXPLORE },
+        )
         playRequestGeneration++
         activeRadioSeed = null
         scope.launch {

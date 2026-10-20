@@ -142,6 +142,12 @@ data class Song(
      * without re-deriving that from the video id.
      */
     val isCampaign: Boolean = false,
+    /**
+     * The campaign's own id (`track_campaigns.id`), present only on a promoted
+     * row. Reported to `record_campaign_stream` when the play qualifies, so the
+     * backend can attribute it. Null on every ordinary track.
+     */
+    val campaignId: String? = null,
 ) {
     /** Legacy derived property: true if and only if [queueTier] is [QueueTier.AUTOPLAY]. */
     val fromAutoplay: Boolean get() = queueTier == QueueTier.AUTOPLAY

@@ -34,6 +34,9 @@ import com.music.bitchord.ui.screens.LibraryScreen
 import com.music.bitchord.ui.screens.MoodGenrePlaylistsScreen
 import com.music.bitchord.ui.screens.SearchScreen
 import com.music.bitchord.data.NerdStats
+import com.music.bitchord.campaign.CampaignPlaybackTracker
+import com.music.bitchord.campaign.CampaignQueueInjection
+import com.music.bitchord.campaign.Campaigns
 import com.music.bitchord.playback.PlaybackPosition
 import com.music.bitchord.playback.QueueSource
 import com.music.bitchord.playback.QueueTimeline
@@ -937,6 +940,29 @@ fun BitChordDesktopApp() {
         }
     }
 
+    /**
+     * Splices campaign slots into the live queue, one fetch per slot, on the current queue's
+     * order — the desktop counterpart of the phone's [CampaignQueueInjection] call in
+     * [PlayerConnection]. A no-op when campaigns are unconfigured or the queue is a party's.
+     */
+    fun injectCampaigns() {
+        if (!Campaigns.enabled) return
+        if (DesktopListenTogether.state.value.inParty) return
+        val base = liveQueue.songs
+        if (base.isEmpty()) return
+        scope.launch {
+            val injected = CampaignQueueInjection.inject(
+                baseItems = base,
+                targetOriginalIndex = liveQueue.index,
+            ) { Campaigns.nextForSlotResolvingGenre() }
+            val adjusted = injected.adjustedTargetIndex
+                .takeIf { it >= 0 }
+                ?.coerceIn(0, injected.items.lastIndex)
+                ?: liveQueue.index.coerceIn(0, injected.items.lastIndex)
+            liveQueue = liveQueue.copy(songs = injected.items, index = adjusted)
+        }
+    }
+
     fun playSongs(songs: List<Song>, startIndex: Int = 0, source: DesktopQueueSource? = null) {
         // A Spotify playlist's rows still being matched to YouTube Music, or with no match, have
         // nothing to play: they stay out of the queue, and the pick moves to the next playable row.
@@ -961,14 +987,19 @@ fun BitChordDesktopApp() {
             selectedIndex = at,
             contextSource = playable[at].queueSource(),
         )
-        liveQueue = if (shuffle) {
+        val ordered = if (shuffle) {
             DesktopQueue.shuffledStartingAt(built.timeline, built.startIndex)
         } else {
             // Keep the complete queue so Previous can navigate to the tracks before the selected one.
             DesktopQueue.startingAt(built.timeline, built.startIndex)
         }
+        liveQueue = ordered
         preShuffleOrder = if (shuffle) built.timeline.map(DesktopQueue::orderKey) else emptyList()
         playCurrent()
+        // Campaigns are spliced in after playback has started, exactly as the phone does it: the
+        // slot is fetched at the moment it is reached, never as a batch, so the queue-slot RPC's
+        // fair-rotation bookkeeping stays correct. See [CampaignQueueInjection].
+        injectCampaigns()
     }
 
     /** Moves within the queue, dropping whatever a forward jump passed over. */
@@ -2056,6 +2087,9 @@ fun BitChordDesktopApp() {
                     statsCountedSongs = statsCountedSongs + songId
                 }
                 statsRevision++
+                // A promoted row is a paid play, qualified the same way and
+                // reported once. Ordinary tracks return immediately.
+                snapshot.song?.let { CampaignPlaybackTracker.onSample(it, snapshot.durationMs) }
             }
             previousPosition = position
         }

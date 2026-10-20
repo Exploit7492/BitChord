@@ -1,6 +1,7 @@
 package com.music.bitchord
 
 import android.app.Application
+import android.content.Context
 import androidx.annotation.OptIn
 import androidx.media3.common.util.UnstableApi
 import coil3.ImageLoader
@@ -132,6 +133,7 @@ class BitChordApplication : Application(), SingletonImageLoader.Factory {
         com.music.bitchord.campaign.Campaigns.init(
             supabaseUrl = BuildConfig.SUPABASE_URL,
             anonKey = BuildConfig.SUPABASE_ANON_KEY,
+            deviceId = campaignDeviceId(this),
         )
         BoundedContextPersistence.init(this)
         com.music.bitchord.playback.PartyPersonalQueueStash.init(this)
@@ -258,6 +260,24 @@ class BitChordApplication : Application(), SingletonImageLoader.Factory {
     companion object {
         lateinit var authStore: AuthStore
             private set
+
+        private const val CAMPAIGN_PREFS = "campaign_prefs"
+        private const val CAMPAIGN_DEVICE_KEY = "campaign_device_id"
+
+        /**
+         * This install's listener identity for campaign attribution. Persisted
+         * so it survives a restart and an app update but not an uninstall — the
+         * same posture the presence install id uses. Generated once and read
+         * again on every start, so the listener row the backend keys plays to
+         * stays the same one.
+         */
+        fun campaignDeviceId(context: Context): String {
+            val prefs = context.getSharedPreferences(CAMPAIGN_PREFS, Context.MODE_PRIVATE)
+            prefs.getString(CAMPAIGN_DEVICE_KEY, null)?.takeIf { it.isNotBlank() }?.let { return it }
+            val generated = java.util.UUID.randomUUID().toString()
+            prefs.edit().putString(CAMPAIGN_DEVICE_KEY, generated).apply()
+            return generated
+        }
 
         /**
          * One-time move from region-less script tags to regional ones.

@@ -17,19 +17,34 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import java.util.UUID
+import java.util.concurrent.TimeUnit
 
 /**
  * Reads the campaign system this app is a consumer of.
  *
  * The campaigns themselves are published elsewhere — this app never creates,
  * edits or pauses one. Its whole job is to ask, per queue slot, which campaign
- * should play next, and to turn the answer into a playable [Song].
+ * should play next, to turn the answer into a playable [Song], and to report
+ * the qualified plays it delivered.
  *
  * The endpoint is the `get_next_campaign_for_queue_slot` RPC, which picks the
  * least-recently-served eligible campaign and marks it served in one
  * transaction. That atomicity is the reason the injection layer calls this once
- * per slot rather than fetching a batch: see
- * [CampaignQueueInjection] for why that distinction is load-bearing.
+ * per slot rather than fetching a batch: see [CampaignQueueInjection] for why
+ * that distinction is load-bearing.
+ *
+ * ## Two HTTP stacks, on purpose
+ *
+ * The queue-slot RPC goes through the injected Ktor [client], the same one the
+ * rest of this module was built on, so campaigns share its pool. The Spotify
+ * branch and the write RPCs (device listener, stream recording) use their own
+ * small OkHttp client instead: they must not depend on Ktor's engine being
+ * configured for a second host, and they are called far less often.
  *
  * @param supabaseUrl The project URL, without a trailing slash.
  * @param anonKey The public anon key. Blank in either disables campaigns
@@ -41,10 +56,18 @@ class CampaignRepository(
     private val anonKey: String,
     private val client: HttpClient,
     private val ytMusic: YtMusicRepository = YtMusicRepository,
+    private val genreTileHost: String = "",
 ) {
 
     private val configured: Boolean
         get() = supabaseUrl.isNotBlank() && anonKey.isNotBlank()
+
+    private val http by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .build()
+    }
 
     /**
      * The next campaign for one queue slot, or null when none is eligible.
@@ -92,10 +115,11 @@ class CampaignRepository(
      *
      * The RPC returns an array (zero or one row) rather than an object, so an
      * empty array is the "no campaign" case. The row's `resolved_song_id` wins
-     * when present; otherwise a video id is taken from the raw `source_url`.
-     * Either way the id is resolved through YouTube Music, which is what
-     * supplies title, artist and artwork — the campaign row itself carries only
-     * the link.
+     * when present; otherwise a video id is extracted from the raw `source_url`
+     * (any real YouTube shape), and only then is a Spotify link resolved at
+     * runtime. Either way the id is resolved through YouTube Music, which
+     * supplies title, artist and artwork — the campaign row carries only the
+     * link.
      */
     private suspend fun resolveRow(body: String): Song? {
         val array = try {
@@ -106,36 +130,175 @@ class CampaignRepository(
         }
         val row = array?.firstOrNull() as? JsonObject ?: return null
 
+        val sourceUrl = row["source_url"]?.jsonPrimitive?.content.orEmpty()
+        val campaignId = row["id"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
         val resolvedSongId = row["resolved_song_id"]?.jsonPrimitive?.content
             ?.takeIf { it.isNotBlank() }
-        val videoId = resolvedSongId ?: extractVideoId(row["source_url"]?.jsonPrimitive?.content.orEmpty())
+        val videoId = resolvedSongId
+            ?: CampaignUrlResolver.extractVideoId(sourceUrl)
+            ?: SpotifyLink.parse(sourceUrl)?.let { CampaignSpotifyResolver.resolve(it)?.videoId }
         if (videoId == null) {
             Log.w(TAG, "queue-slot row carried no usable video id")
             return null
         }
 
-        return ytMusic.trackLinks(videoId).getOrNull()
+        // The campaign id rides on the row so the play reporter can attribute a
+        // qualified play without a second lookup.
+        return ytMusic.trackLinks(videoId).getOrNull()?.copy(campaignId = campaignId)
+    }
+
+    /**
+     * Registers (or re-registers) this device as a listener and returns the
+     * listener id the campaign write RPCs expect. The RPC echoes the device id
+     * back. Null on failure — the caller then reports a play without a user id,
+     * which the server tolerates.
+     */
+    suspend fun ensureDeviceListener(deviceId: String): String? = withContext(Dispatchers.IO) {
+        if (!configured) return@withContext null
+        try {
+            rpc("ensure_device_listener", "{\"p_device_id\":\"$deviceId\"}")
+                ?.trim()?.trim('"')?.takeIf { it.isNotBlank() }
+        } catch (e: Exception) {
+            Log.w(TAG, "ensureDeviceListener failed: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Reports a qualified campaign play. Fire-and-forget by contract: a failure
+     * here must never surface to the listener, and the play is already over, so
+     * there is nothing to retry against.
+     *
+     * @param isFullListen Whether the listener heard enough of the track to
+     *   count as a full listen (the server applies the same qualification the
+     *   rest of the app uses).
+     */
+    suspend fun recordCampaignStream(
+        campaignId: String,
+        userId: String? = null,
+        listenDurationSeconds: Int = 0,
+        countryCode: String? = null,
+        isFullListen: Boolean = false,
+    ) {
+        if (!configured) return
+        withContext(Dispatchers.IO) {
+            try {
+                val payload = buildString {
+                    append("{\"p_campaign_id\":"); append(JsonPrimitive(campaignId)); append(',')
+                    append("\"p_user_id\":"); append(JsonPrimitive(userId ?: UUID.randomUUID().toString())); append(',')
+                    append("\"p_listen_duration_seconds\":"); append(listenDurationSeconds.coerceAtLeast(0)); append(',')
+                    append("\"p_country_code\":"); append(JsonPrimitive(countryCode ?: "unknown")); append(',')
+                    append("\"p_is_full_listen\":"); append(isFullListen)
+                    append('}')
+                }
+                rpc("record_campaign_stream", payload)
+            } catch (e: Exception) {
+                Log.w(TAG, "recordCampaignStream failed for $campaignId: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * A campaign's current gathered stream total, read straight from
+     * `track_campaigns`. A card is a snapshot, so while a campaign is on screen
+     * its total keeps moving; a surface showing "the campaign's total" re-reads
+     * it rather than trusting the tap-time copy. Null on any failure.
+     */
+    suspend fun fetchCampaignTotalStreams(campaignId: String): Long? = withContext(Dispatchers.IO) {
+        if (!configured) return@withContext null
+        try {
+            val request = Request.Builder()
+                .url("$supabaseUrl/rest/v1/track_campaigns?select=total_streams&id=eq.$campaignId")
+                .header("apikey", anonKey)
+                .header("Authorization", "Bearer $anonKey")
+                .get()
+                .build()
+            http.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return@use null
+                val body = response.body.string().orEmpty()
+                val array = runCatching { Json.parseToJsonElement(body) as? JsonArray }.getOrNull()
+                val row = array?.firstOrNull() as? JsonObject ?: return@use null
+                row["total_streams"]?.jsonPrimitive?.content?.toLongOrNull()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "fetchCampaignTotalStreams failed for $campaignId: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * The reviewed portion of `campaign_genre_tile_mapping`, as a
+     * `tile_title -> mapped_genre_id` map (the value may be null for a tile an
+     * admin confirmed is a mood, not a genre). Empty on any failure, which
+     * callers treat as "no confirmed mapping" — the same fail-closed default
+     * the rest of this feature uses.
+     */
+    suspend fun fetchGenreTileMapping(): Map<String, String?> = withContext(Dispatchers.IO) {
+        if (!configured) return@withContext emptyMap()
+        try {
+            val request = Request.Builder()
+                .url("$supabaseUrl/rest/v1/campaign_genre_tile_mapping?is_reviewed=eq.true&select=tile_title,mapped_genre_id")
+                .header("apikey", anonKey)
+                .header("Authorization", "Bearer $anonKey")
+                .get()
+                .build()
+            http.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return@use emptyMap()
+                val body = response.body.string().orEmpty()
+                val array = runCatching { Json.parseToJsonElement(body) as? JsonArray }.getOrNull()
+                    ?: return@use emptyMap()
+                array.mapNotNull { element ->
+                    val row = element as? JsonObject ?: return@mapNotNull null
+                    val title = row["tile_title"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+                        ?: return@mapNotNull null
+                    val mapped = row["mapped_genre_id"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+                    title to mapped
+                }.toMap()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "fetchGenreTileMapping failed: ${e.message}")
+            emptyMap()
+        }
+    }
+
+    /**
+     * Reports an unresolved genre tile so an admin can review it. Best-effort:
+     * the host is mavins-web, not Supabase, so a blank host or a failed call is
+     * silently ignored — the tile still reaches the server as a raw term and
+     * fails closed there.
+     */
+    suspend fun ingestGenreTile(tileTitle: String) {
+        if (genreTileHost.isBlank() || tileTitle.isBlank()) return
+        withContext(Dispatchers.IO) {
+            try {
+                val payload = "{\"tile_title\":${JsonPrimitive(tileTitle)}}"
+                val request = Request.Builder()
+                    .url("${genreTileHost.trimEnd('/')}/api/campaigns/genre-tile-mapping/ingest")
+                    .header("Content-Type", "application/json")
+                    .post(payload.toRequestBody("application/json".toMediaType()))
+                    .build()
+                http.newCall(request).execute().use { }
+            } catch (e: Exception) {
+                Log.w(TAG, "ingestGenreTile failed for $tileTitle: ${e.message}")
+            }
+        }
+    }
+
+    /** POST a Supabase RPC and return its raw body, or null on a non-2xx. */
+    private fun rpc(name: String, jsonBody: String): String? {
+        val request = Request.Builder()
+            .url("$supabaseUrl/rest/v1/rpc/$name")
+            .header("apikey", anonKey)
+            .header("Authorization", "Bearer $anonKey")
+            .header("Content-Type", "application/json")
+            .post(jsonBody.toRequestBody("application/json".toMediaType()))
+            .build()
+        return http.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) null else response.body.string()
+        }
     }
 
     private companion object {
         const val TAG = "BitChord"
-
-        /**
-         * Pulls the `v=` value out of a YouTube watch URL.
-         *
-         * Deliberately narrow: only the shapes a campaign submission actually
-         * produces. A short link or a `youtu.be` form is not guessed at — the
-         * RPC's own eligibility filter admits rows by their YouTube-URL shape,
-         * and a row that reached here without a `resolved_song_id` is one whose
-         * link was stored as a plain watch URL.
-         */
-        fun extractVideoId(url: String): String? {
-            if (url.isBlank()) return null
-            val marker = url.indexOf("v=")
-            if (marker < 0) return null
-            return url.substring(marker + 2)
-                .takeWhile { it != '&' && it != '?' && it != '#' }
-                .takeIf { it.isNotBlank() }
-        }
     }
 }

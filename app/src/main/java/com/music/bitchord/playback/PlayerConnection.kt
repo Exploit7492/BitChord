@@ -240,6 +240,7 @@ fun Song.toSongBundle(): Bundle = bundleOf(
     "queueTier" to queueTier.name,
     "queueEntryId" to queueEntryId,
     "isCampaign" to isCampaign,
+    "campaignId" to campaignId,
     // `bundleOf` has no overload for a list of strings, so the two halves of
     // the credits go in afterwards.
 ).apply {
@@ -276,6 +277,7 @@ fun songFromBundle(b: Bundle): Song {
         queueTier = queueTier,
         queueEntryId = b.getString("queueEntryId"),
         isCampaign = b.getBoolean("isCampaign"),
+        campaignId = b.getString("campaignId"),
     )
 }
 
@@ -466,6 +468,7 @@ fun MediaItem.toSong() = Song(
     localUri = mediaMetadata.extras?.getString(EXTRA_LOCAL_URI),
     localPath = mediaMetadata.extras?.getString(EXTRA_LOCAL_PATH),
     isCampaign = mediaMetadata.extras?.getBoolean(EXTRA_IS_CAMPAIGN) == true,
+    campaignId = mediaMetadata.extras?.getString(EXTRA_CAMPAIGN_ID),
 )
 
 internal val mediaItemTiers = java.util.Collections.synchronizedMap(java.util.WeakHashMap<MediaItem, QueueTier>())
@@ -584,6 +587,7 @@ private const val EXTRA_SOURCE_HI_RES = "bitchord.sourceHiRes"
 private const val EXTRA_IS_VIDEO = "bitchord.isVideo"
 private const val EXTRA_VIDEO_ORIGIN = "bitchord.isVideoOrigin"
 private const val EXTRA_IS_CAMPAIGN = "bitchord.isCampaign"
+private const val EXTRA_CAMPAIGN_ID = "bitchord.campaignId"
 
 /** Set only on the replacement item produced by [QualityUpgrade]. */
 const val EXTRA_QUALITY_UPGRADED = "bitchord.qualityUpgraded"
@@ -787,6 +791,7 @@ fun Song.toMediaItem(): MediaItem {
                             EXTRA_SOURCE_QUALITY to sourceQuality,
                             EXTRA_SOURCE_HI_RES to sourceHiRes,
                             EXTRA_IS_CAMPAIGN to isCampaign,
+                            EXTRA_CAMPAIGN_ID to campaignId,
                         ),
                     )
                 }
@@ -915,7 +920,7 @@ suspend fun MediaController.playSongs(songs: List<Song>, startIndex: Int) {
         val injected = CampaignQueueInjection.inject(
             baseItems = queue,
             targetOriginalIndex = baseStartIndex,
-        ) { Campaigns.nextForSlot() }
+        ) { Campaigns.nextForSlotResolvingGenre() }
         val ordered = injected.items
         val playIndex = injected.adjustedTargetIndex
             .takeIf { it >= 0 }

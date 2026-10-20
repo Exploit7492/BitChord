@@ -27,6 +27,19 @@ import kotlin.math.roundToInt
 import org.jetbrains.compose.resources.painterResource
 
 fun main() {
+    // Campaign injection is read-only here, exactly as on the phone: the app
+    // only asks which campaign plays in a queue slot. Supplied from the build
+    // (`-Dbitchord.supabase.*`) or the environment, never committed; blank
+    // either way simply disables injection rather than failing.
+    com.music.bitchord.campaign.Campaigns.init(
+        supabaseUrl = System.getProperty("bitchord.supabase.url")
+            ?: System.getenv("BITCHORD_SUPABASE_URL").orEmpty(),
+        anonKey = System.getProperty("bitchord.supabase.anonKey")
+            ?: System.getenv("BITCHORD_SUPABASE_ANON_KEY").orEmpty(),
+        genreTileHost = System.getProperty("bitchord.campaign.host")
+            ?: System.getenv("BITCHORD_CAMPAIGN_HOST").orEmpty(),
+        deviceId = desktopCampaignDeviceId(),
+    )
     // Before any WebView exists, so the sign-in window can start over with an empty jar.
     DesktopWebCookies.install()
     DesktopWindowVisibility.install()
@@ -187,3 +200,17 @@ private fun desktopMain() = application {
 
 private const val MIN_WINDOW_WIDTH_DP = 900.0
 private const val MIN_WINDOW_HEIGHT_DP = 600.0
+
+/**
+ * This desktop install's listener identity for campaign attribution, persisted
+ * under java.util.prefs so the same listener row is used across restarts. The
+ * shared campaign module has no storage of its own, so it is read here and
+ * handed to [com.music.bitchord.campaign.Campaigns.init].
+ */
+private fun desktopCampaignDeviceId(): String {
+    val prefs = java.util.prefs.Preferences.userRoot().node("com.music.bitchord.desktop.campaign")
+    prefs.get("device_id", null)?.takeIf { it.isNotBlank() }?.let { return it }
+    val generated = java.util.UUID.randomUUID().toString()
+    prefs.put("device_id", generated)
+    return generated
+}

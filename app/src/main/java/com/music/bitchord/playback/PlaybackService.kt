@@ -14,6 +14,7 @@ import android.widget.Toast
 import android.os.Bundle
 import android.os.Handler
 import android.os.SystemClock
+import com.music.bitchord.campaign.CampaignPlaybackTracker
 import com.music.bitchord.data.TelemetryProvenance
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -894,7 +895,10 @@ class PlaybackService : MediaLibraryService() {
             // stop being told about play: its sampler measures the gap between
             // ticks, and an unclosed one across a pause is an afternoon on the
             // lock screen arriving as an afternoon of listening.
-            if (!isPlaying) ListeningRecorder.onStopped()
+            if (!isPlaying) {
+                ListeningRecorder.onStopped()
+                CampaignPlaybackTracker.onStopped()
+            }
 
             // ListenBrainz: "now playing" on play/resume too, not just on
             // transition — a track started from idle or resumed from pause
@@ -3470,6 +3474,7 @@ class PlaybackService : MediaLibraryService() {
         // this the second play through is a continuation of the first and is
         // never counted.
         ListeningRecorder.onStopped()
+        CampaignPlaybackTracker.onStopped()
         val newSong = mediaItem?.toSong()
         val durationMs = exoPlayer.duration.takeIf { it > 0 }
         if (exoPlayer.isPlaying) {
@@ -6008,6 +6013,11 @@ class PlaybackService : MediaLibraryService() {
                     // makes it the right place to count from.
                     player.currentMediaItem?.toSong()?.let {
                         ListeningRecorder.onSample(it, player.duration)
+                        // A promoted row is a paid play; it is qualified and
+                        // reported from the same "audio is actually coming out"
+                        // tick, so it can never count a skip. Ordinary tracks
+                        // return immediately.
+                        CampaignPlaybackTracker.onSample(it, player.duration)
                     }
                     // Only two primitive preference values. Queue JSON is
                     // written from onTimelineChanged, never from this loop.
@@ -7174,6 +7184,7 @@ class PlaybackService : MediaLibraryService() {
         // Last chance to get the current track's minutes onto disk: the scope is
         // cancelled a few lines down and the sampler goes with it.
         ListeningRecorder.onStopped()
+        CampaignPlaybackTracker.onStopped()
         // Discord, on the same terms as the ListenBrainz submit above: the
         // service scope is cancelled a few lines down, and a presence left up
         // would advertise a track that stopped when the process did — until
