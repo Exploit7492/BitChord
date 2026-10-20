@@ -35,6 +35,23 @@ val lastfmSecret: String = (
     ).trim()
 
 /*
+ * The campaign read path, shared with the phone app through
+ * BitChordApplication (TV builds from app/src/main/java). Blank disables
+ * injection rather than failing, so a checkout without these builds and plays
+ * exactly as it would without campaigns. See CampaignRepository.
+ */
+val supabaseUrl: String = (
+    localProps.getProperty("SUPABASE_URL")
+        ?: System.getenv("SUPABASE_URL")
+        ?: ""
+    ).trim().trimEnd('/')
+val supabaseAnonKey: String = (
+    localProps.getProperty("SUPABASE_ANON_KEY")
+        ?: System.getenv("SUPABASE_ANON_KEY")
+        ?: ""
+    ).trim()
+
+/*
  * Where Listen Together's party server lives. Not a credential — it is a public
  * URL, and every device in a party has to be pointed at the same one — but it is
  * deployment-specific rather than a property of the source, which is what puts
@@ -94,6 +111,18 @@ android {
             "String",
             "LISTEN_TOGETHER_SERVER",
             "\"${listenTogetherServer.replace("\\", "\\\\").replace("\"", "\\\"")}\"",
+        )
+        // Campaigns, read-only, shared with the phone app's own Application
+        // class. See supabaseUrl above.
+        buildConfigField(
+            "String",
+            "SUPABASE_URL",
+            "\"${supabaseUrl.replace("\\", "\\\\").replace("\"", "\\\"")}\"",
+        )
+        buildConfigField(
+            "String",
+            "SUPABASE_ANON_KEY",
+            "\"${supabaseAnonKey.replace("\\", "\\\\").replace("\"", "\\\"")}\"",
         )
         // The TV APKs share a GitHub release with the phone ones and are told
         // apart by name (BitChordTV-v1.8.apk, BitChordTV-v1.8_x86_64.apk), so
