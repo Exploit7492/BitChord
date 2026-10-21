@@ -199,6 +199,101 @@ class CampaignRepository(
     }
 
     /**
+     * Every currently-live campaign, for the home banner.
+     *
+     * Ported from Velune's `fetchLiveCampaignsForBanner`. Read straight from
+     * `track_campaigns` over REST rather than through the queue-slot RPC: the
+     * RPC hands out one campaign per queue slot and marks it served, which is
+     * the opposite of what a browse surface wants — the banner shows what is
+     * live, and the RPC's own eligibility filter is YouTube-shape-only while
+     * this surface draws from every live row.
+     *
+     * The `select=` list names every column the parser below reads. PostgREST
+     * omits a column that is not named rather than returning it null, so a
+     * field missing from that list is silently absent, not empty —
+     * `tracks(title,cover_url)` and `users(artist_name)` are pulled in through
+     * the table's two real foreign keys rather than invented as flat columns,
+     * since neither lives on `track_campaigns` itself.
+     *
+     * Rows whose title or cover did not arrive through the join get one live
+     * YouTube lookup, run concurrently and awaited before this returns, so the
+     * banner never draws a frame reading "Untitled" for a track that resolves
+     * fine. Row order is the server's, deliberately — it is not a ranking, and
+     * the UI owns rotation order.
+     *
+     * Empty on any failure, the same fail-soft posture as every other read in
+     * this file: a banner that cannot load renders nothing rather than breaking
+     * the feed behind it.
+     */
+    suspend fun fetchLiveCampaignsForBanner(): List<CampaignCard> = withContext(Dispatchers.IO) {
+        if (!configured) return@withContext emptyList()
+        try {
+            val request = Request.Builder()
+                .url(
+                    "$supabaseUrl/rest/v1/track_campaigns" +
+                        "?select=id,source_url,resolved_song_id,track_id,artist_id," +
+                        "total_streams,current_stage,tracks(title,cover_url),users(artist_name)" +
+                        "&is_active=eq.true&is_paused=eq.false" +
+                        "&current_stage=neq.completed&current_stage=neq.cancelled",
+                )
+                .header("apikey", anonKey)
+                .header("Authorization", "Bearer $anonKey")
+                .get()
+                .build()
+            http.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    Log.w(TAG, "fetchLiveCampaignsForBanner: HTTP ${response.code}")
+                    return@use emptyList()
+                }
+                parseBannerRows(response.body.string().orEmpty())
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "fetchLiveCampaignsForBanner failed: ${e.message}")
+            emptyList()
+        }
+    }
+
+    /**
+     * Turns the REST rows into banner cards, dropping any row with no playable
+     * id. Deliberately tolerant per row: one malformed campaign must not take
+     * the whole banner down, so anything unreadable is skipped rather than
+     * thrown on.
+     */
+    private fun parseBannerRows(body: String): List<CampaignCard> {
+        val array = runCatching { Json.parseToJsonElement(body) as? JsonArray }.getOrNull()
+            ?: return emptyList()
+        return array.mapNotNull { element ->
+            val row = element as? JsonObject ?: return@mapNotNull null
+            val id = row["id"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+                ?: return@mapNotNull null
+            val sourceUrl = row["source_url"]?.jsonPrimitive?.content.orEmpty()
+            val songId = row["resolved_song_id"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+                ?: CampaignUrlResolver.extractVideoId(sourceUrl)
+                ?: return@mapNotNull null
+
+            val stage = row["current_stage"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+                ?: "planting"
+            val tracks = row["tracks"] as? JsonObject
+            val users = row["users"] as? JsonObject
+            CampaignCard(
+                id = id,
+                songId = songId,
+                title = tracks?.get("title")?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+                    ?: "Untitled",
+                artist = users?.get("artist_name")?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+                    ?: "Unknown Artist",
+                thumbnailUrl = tracks?.get("cover_url")?.jsonPrimitive?.content.orEmpty(),
+                totalStreams = row["total_streams"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
+                currentStage = stage,
+                // Same stage-based rule Velune uses: a campaign far enough along
+                // its lifecycle has been through review.
+                certified = stage == "branching" || stage == "full_bloom",
+                isLive = true, // the query's own filter guarantees this
+            )
+        }
+    }
+
+    /**
      * A campaign's current gathered stream total, read straight from
      * `track_campaigns`. A card is a snapshot, so while a campaign is on screen
      * its total keeps moving; a surface showing "the campaign's total" re-reads

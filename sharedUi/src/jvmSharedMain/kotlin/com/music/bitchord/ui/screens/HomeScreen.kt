@@ -42,8 +42,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -81,6 +83,9 @@ import com.music.bitchord.ui.components.PullToRefresh
 import com.music.bitchord.ui.components.SHELF_CARD_WIDTH
 import com.music.bitchord.ui.components.SearchPlayingBars
 import com.music.bitchord.ui.components.SignInBanner
+import com.music.bitchord.campaign.CampaignCard
+import com.music.bitchord.campaign.Campaigns
+import com.music.bitchord.ui.components.CampaignBanner
 import com.music.bitchord.ui.components.feedMoreSkeleton
 import com.music.bitchord.ui.components.feedSkeleton
 import com.music.bitchord.ui.components.recentlyPlayedSkeleton
@@ -124,6 +129,12 @@ fun HomeScreen(
     signedIn: Boolean = true,
     onSignIn: (() -> Unit)? = null,
     /**
+     * Plays a promoted campaign the banner is showing. Null leaves the banner
+     * inert rather than offering a tap with nothing behind it — the desktop's
+     * page passes nothing here.
+     */
+    onCampaignClick: ((CampaignCard) -> Unit)? = null,
+    /**
      * Holding a card rather than tapping it. Every card on the feed answers,
      * whichever kind it is: the caller reads the item the same way it does for
      * a tap, so a track card opens the track menu and a card that points at a
@@ -144,6 +155,17 @@ fun HomeScreen(
     isPlaying: Boolean = false,
 ) {
     val recentsViewType by AppUi.host.homeRecentsViewType.collectAsStateWithLifecycle()
+
+    // The promoted campaign for the banner, refreshed with the feed. Held here
+    // rather than in the caller so every home surface — the phone's tab and the
+    // desktop's page — draws the same campaign without each having to fetch it.
+    // The first live campaign wins; a rotation across several is a later
+    // refinement, and drawing one is what makes the slot read as a promotion
+    // rather than an ad break.
+    var featuredCampaign by remember { mutableStateOf<CampaignCard?>(null) }
+    LaunchedEffect(Unit) {
+        featuredCampaign = Campaigns.liveCampaignsForBanner().firstOrNull()
+    }
 
     PullToRefresh(
         refreshing = refreshing,
@@ -168,9 +190,17 @@ fun HomeScreen(
             if (title != null) {
                 item { HomeTitle(title) }
             }
-            if (!signedIn && onSignIn != null) {
+            // A live campaign takes the slot the sign-in prompt used to hold.
+            // The prompt is not gone from the app — it still stands in Settings,
+            // where an account is managed — but a signed-out listener is shown
+            // the promoted track rather than being asked again on the feed.
+            featuredCampaign?.let { campaign ->
                 item {
-                    SignInBanner(onSignIn = onSignIn, modifier = Modifier.padding(bottom = 8.dp))
+                    CampaignBanner(
+                        campaign = campaign,
+                        onClick = { onCampaignClick?.invoke(campaign) },
+                        modifier = Modifier.padding(horizontal = PAGE_GUTTER, vertical = 8.dp),
+                    )
                 }
             }
             when (state) {

@@ -3114,6 +3114,29 @@ private fun BitChordApp(
                                 }
                             },
                             onItemLongPress = onShelfLongPress,
+                            // A tap on the promoted banner plays the campaign
+                            // as a one-off radio queue, the same shape a tap on
+                            // any other home card produces. The campaign id is
+                            // stamped onto the resolved song so the play
+                            // reporter can attribute the listen without a
+                            // second lookup.
+                            onCampaignClick = { campaign ->
+                                scope.launch {
+                                    val song = YtMusicRepository
+                                        .trackLinks(campaign.songId)
+                                        .getOrNull()
+                                        ?.copy(campaignId = campaign.id)
+                                    if (song != null) {
+                                        playRadio(
+                                            song,
+                                            QueueSource(
+                                                "Promoted",
+                                                PlaybackSourceType.HOME,
+                                            ),
+                                        )
+                                    }
+                                }
+                            },
                             onRetry = viewModel::loadHome,
                             refreshing = MainViewModel.Feed.HOME in refreshing,
                             onRefresh = { viewModel.refresh(MainViewModel.Feed.HOME) },

@@ -126,4 +126,11 @@ object Campaigns {
 
     /** A campaign's current gathered total, or null on failure. */
     suspend fun campaignTotalStreams(campaignId: String): Long? = repository?.fetchCampaignTotalStreams(campaignId)
+
+    /**
+     * Every currently-live campaign, for the home banner. Empty when no backend
+     * is configured, which is what a build without one shows.
+     */
+    suspend fun liveCampaignsForBanner(): List<CampaignCard> =
+        repository?.fetchLiveCampaignsForBanner() ?: emptyList()
 }
