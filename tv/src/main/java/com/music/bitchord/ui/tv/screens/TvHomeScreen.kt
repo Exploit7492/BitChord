@@ -23,6 +23,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.media3.session.MediaController
+import com.music.bitchord.campaign.CampaignCard
+import com.music.bitchord.campaign.Campaigns
+import com.music.bitchord.data.YtMusicRepository
 import com.music.bitchord.data.model.BrowseType
 import com.music.bitchord.data.model.HomeShelf
 import com.music.bitchord.data.model.ShelfItem
@@ -31,6 +34,7 @@ import com.music.bitchord.data.model.UiState
 import com.music.bitchord.playback.playSongs
 import com.music.bitchord.ui.MainViewModel
 import com.music.bitchord.ui.tv.components.TvActivityIndicator
+import com.music.bitchord.ui.tv.components.TvCampaignBanner
 import com.music.bitchord.ui.tv.components.TvCard
 import com.music.bitchord.ui.tv.components.TvChromeScrollEffect
 import com.music.bitchord.ui.tv.components.TvEmptyState
@@ -56,8 +60,33 @@ fun TvHomeScreen(
     val scope = rememberCoroutineScope()
     var menuSong by remember { mutableStateOf<Song?>(null) }
 
+    // The promoted campaign for the band under the tab bar. The first live
+    // campaign wins; a rotation across several is a later refinement, and one is
+    // what makes the band read as a promotion rather than an ad break.
+    var featuredCampaign by remember { mutableStateOf<CampaignCard?>(null) }
+    LaunchedEffect(Unit) {
+        featuredCampaign = Campaigns.liveCampaignsForBanner().firstOrNull()
+    }
+    // A tap on the band plays the campaign as a one-off queue, the same shape a
+    // tap on any other home card produces. The campaign id is stamped onto the
+    // resolved song so the play reporter can attribute the listen without a
+    // second lookup.
+    val onCampaignClick: (CampaignCard) -> Unit = { campaign ->
+        scope.launch {
+            val song = YtMusicRepository.trackLinks(campaign.songId).getOrNull()
+                ?.copy(campaignId = campaign.id)
+            if (song != null) {
+                mediaController?.playSongs(listOf(song), 0)
+                onNavigateToNowPlaying()
+            }
+        }
+    }
+
     when (val state = homeState) {
-        is UiState.Loading -> TvShelvesLoading(modifier)
+        is UiState.Loading -> TvShelvesLoading(
+            header = campaignHeader(featuredCampaign, onCampaignClick),
+            modifier = modifier,
+        )
         is UiState.Error -> TvErrorState(
             message = state.message,
             onRetry = { viewModel.refresh(MainViewModel.Feed.HOME) },
@@ -65,11 +94,17 @@ fun TvHomeScreen(
         )
         is UiState.Success -> {
             if (state.data.isEmpty()) {
-                TvEmptyState(
-                    title = "Nothing Here Yet",
-                    message = "Sign in from Settings, or check your connection, to see your recommendations.",
-                    modifier = modifier,
-                )
+                // The band still shows over an empty feed, the same way the phone
+                // shows it over the sign-in prompt: a promotion is worth showing
+                // even when there is nothing else to show yet.
+                Column(modifier = modifier.fillMaxSize()) {
+                    campaignHeader(featuredCampaign, onCampaignClick)?.invoke()
+                    TvEmptyState(
+                        title = "Nothing Here Yet",
+                        message = "Sign in from Settings, or check your connection, to see your recommendations.",
+                        modifier = Modifier.weight(1f),
+                    )
+                }
             } else {
                 TvShelfFeed(
                     shelves = state.data,
@@ -82,6 +117,7 @@ fun TvHomeScreen(
                     onSongMenu = { menuSong = it },
                     onNavigateToDetail = onNavigateToDetail,
                     picksFirst = true,
+                    header = campaignHeader(featuredCampaign, onCampaignClick),
                     modifier = modifier,
                 )
             }
@@ -99,15 +135,31 @@ fun TvHomeScreen(
     }
 }
 
+/**
+ * The promoted band for the top of the home feed, or null when there is no live
+ * campaign. Built as a composable lambda so the callers that take a `header`
+ * slot pass it through unchanged, and the one that has no slot wraps it.
+ */
+private fun campaignHeader(
+    campaign: CampaignCard?,
+    onClick: (CampaignCard) -> Unit,
+): (@Composable () -> Unit)? = campaign?.let { card ->
+    { TvCampaignBanner(campaign = card, onClick = { onClick(card) }) }
+}
+
 /** Placeholder shelves while a feed loads. */
 @Composable
-internal fun TvShelvesLoading(modifier: Modifier = Modifier) {
+internal fun TvShelvesLoading(
+    modifier: Modifier = Modifier,
+    header: (@Composable () -> Unit)? = null,
+) {
     Column(
         modifier = modifier
             .fillMaxSize()
             .padding(top = TvDimensions.ContentTop + 6.dp),
         verticalArrangement = Arrangement.spacedBy(TvDimensions.ShelfSpacing),
     ) {
+        header?.invoke()
         TvShelfPlaceholder(width = 160.dp, count = 5)
         TvShelfPlaceholder()
     }
