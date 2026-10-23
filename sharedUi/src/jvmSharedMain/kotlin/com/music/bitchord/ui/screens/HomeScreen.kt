@@ -85,6 +85,7 @@ import com.music.bitchord.ui.components.SearchPlayingBars
 import com.music.bitchord.ui.components.SignInBanner
 import com.music.bitchord.campaign.CampaignCard
 import com.music.bitchord.campaign.Campaigns
+import com.music.bitchord.campaign.rememberCampaignCarouselState
 import com.music.bitchord.ui.components.CampaignBanner
 import com.music.bitchord.ui.components.feedMoreSkeleton
 import com.music.bitchord.ui.components.feedSkeleton
@@ -156,16 +157,18 @@ fun HomeScreen(
 ) {
     val recentsViewType by AppUi.host.homeRecentsViewType.collectAsStateWithLifecycle()
 
-    // The promoted campaign for the banner, refreshed with the feed. Held here
-    // rather than in the caller so every home surface — the phone's tab and the
-    // desktop's page — draws the same campaign without each having to fetch it.
-    // The first live campaign wins; a rotation across several is a later
-    // refinement, and drawing one is what makes the slot read as a promotion
-    // rather than an ad break.
-    var featuredCampaign by remember { mutableStateOf<CampaignCard?>(null) }
+    // The promoted campaigns for the banner, refreshed with the feed. Held
+    // here rather than in the caller so every home surface — the phone's tab
+    // and the desktop's page — draws the same campaign without each having to
+    // fetch it. The banner slides through them one at a time on its own timer;
+    // drawing one at a time is what makes the slot read as a promotion rather
+    // than an ad break.
+    var liveCampaigns by remember { mutableStateOf<List<CampaignCard>>(emptyList()) }
     LaunchedEffect(Unit) {
-        featuredCampaign = Campaigns.liveCampaignsForBanner().firstOrNull()
+        liveCampaigns = Campaigns.liveCampaignsForBanner()
     }
+    val campaignCarousel = rememberCampaignCarouselState(liveCampaigns)
+    val featuredCampaign = campaignCarousel.current
 
     PullToRefresh(
         refreshing = refreshing,
